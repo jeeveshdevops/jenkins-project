@@ -1,5 +1,6 @@
 
 pipeline {
+
     agent any
 
     triggers {
@@ -7,74 +8,113 @@ pipeline {
     }
 
     tools {
-        jdk 'JDK-17'
-        maven 'Maven-3.9.9'
-    }
-
-    options {
-        timestamps()
-        buildDiscarder(logRotator(numToKeepStr: '5'))
+        jdk 'JDK17'
+        maven 'Maven'
     }
 
     environment {
         TOMCAT_CONTAINER = 'tomcat'
-        WAR_NAME = 'employee_task.war'
+        WAR_NAME = 'schedule.war'
+        DEPLOY_PATH = '/usr/local/tomcat/webapps'
     }
 
     stages {
 
-        stage('Checkout') {
+        stage('Git Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Check Tools') {
+        stage('Maven Clean') {
             steps {
-                sh '''
-                    java -version
-                    mvn -version
-                    docker --version
-                '''
+                sh 'mvn clean'
             }
         }
 
-        stage('Build Application') {
+        stage('Build and Test') {
             steps {
-                sh 'mvn clean package -DskipTests'
+                sh 'mvn -B verify'
             }
         }
 
         stage('Verify WAR') {
             steps {
                 sh '''
-                    ls -lh target/*.war
-                    test -n "$(find target -maxdepth 1 -name '*.war' -print -quit)"
+                    echo "Checking WAR file"
+                    ls -lh target/
+                    test -f target/${WAR_NAME}
+                    echo "WAR file verified successfully"
                 '''
             }
         }
 
-        stage('Deploy to Tomcat 11') {
+        stage('Check Tomcat Container') {
             steps {
                 sh '''
-                    WAR_FILE=$(find target -maxdepth 1 -name '*.war' | head -1)
-
-                    docker exec tomcat rm -rf /usr/local/tomcat/webapps/employee_task
-
-                    docker cp "$WAR_FILE" \
-                        tomcat:/usr/local/tomcat/webapps/employee_task.war
-
-                    docker restart tomcat
+                    docker inspect "$TOMCAT_CONTAINER"
+                    docker exec "$TOMCAT_CONTAINER" \
+                    test -d "$DEPLOY_PATH"
                 '''
+            }
+        }
+
+        stage('Backup Previous WAR') {
+            steps {
+                sh '''
+                    docker exec "$TOMCAT_CONTAINER" sh -c \
+                    'if [ -f /usr/local/tomcat/webapps/schedule.war ]; then
+                       cp /usr/local/tomcat/webapps/schedule.war \
+                       /usr/local/tomcat/webapps/schedule-backup.war
+                     fi'
+                '''
+            }
+        }
+
+        stage('Remove Old Deployment') {
+            steps {
+                sh '''
+                    docker exec "$TOMCAT_CONTAINER" sh -c \
+                    'rm -rf /usr/local/tomcat/webapps/schedule \
+                    /usr/local/tomcat/webapps/schedule.war'
+                '''
+            }
+        }
+
+        stage('Deploy WAR') {
+            steps {
+                sh '''
+                    docker cp target/${WAR_NAME} \
+                    ${TOMCAT_CONTAINER}:${DEPLOY_PATH}/${WAR_NAME}
+                '''
+            }
+        }
+
+        stage('Restart Tomcat') {
+            steps {
+                sh 'docker restart "$TOMCAT_CONTAINER"'
             }
         }
 
         stage('Verify Deployment') {
             steps {
                 sh '''
-                    sleep 20
-                    docker ps
-                    docker logs --tail 50 tomcat
+                    echo "Waiting for Tomcat deployment..."
+
+                    for i in $(seq 1 30); do
+
+                        if docker exec "$TOMCAT_CONTAINER" \
+                        test -d "$DEPLOY_PATH/schedule"; then
+
+                            echo "Deployment successful!"
+                            exit 0
+                        fi
+
+                        sleep 2
+                    done
+
+                    docker logs --tail 100 "$TOMCAT_CONTAINER"
+                    exit 1
                 '''
             }
         }
@@ -82,11 +122,11 @@ pipeline {
 
     post {
         success {
-            echo 'Application deployed to Tomcat 11 successfully!'
+            echo 'SUCCESS: GitHub to Jenkins to Tomcat deployment completed!'
         }
 
         failure {
-            echo 'Pipeline failed. Please check Console Output.'
+            echo 'FAILED: Check Jenkins Console Output.'
         }
 
         always {
