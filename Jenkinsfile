@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -10,80 +11,86 @@ pipeline {
         maven 'Maven-3.9.9'
     }
 
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '5'))
+    }
+
+    environment {
+        TOMCAT_CONTAINER = 'tomcat'
+        WAR_NAME = 'employee_task.war'
+    }
+
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Build and Test') {
-            steps {
-                sh 'mvn clean verify'
-            }
-        }
-
-        stage('Build Docker Image') {
-            steps {
-                sh 'docker build -t employee-app:latest .'
-            }
-        }
-
-        stage('Deploy Application') {
+        stage('Check Tools') {
             steps {
                 sh '''
-                    docker rm -f employee-app || true
-                    docker run -d \
-                        --name employee-app \
-                        -p 8082:8080 \
-                        --restart unless-stopped \
-                        employee-app:latest
+                    java -version
+                    mvn -version
+                    docker --version
+                '''
+            }
+        }
+
+        stage('Build Application') {
+            steps {
+                sh 'mvn clean package -DskipTests'
+            }
+        }
+
+        stage('Verify WAR') {
+            steps {
+                sh '''
+                    ls -lh target/*.war
+                    test -n "$(find target -maxdepth 1 -name '*.war' -print -quit)"
+                '''
+            }
+        }
+
+        stage('Deploy to Tomcat 11') {
+            steps {
+                sh '''
+                    WAR_FILE=$(find target -maxdepth 1 -name '*.war' | head -1)
+
+                    docker exec tomcat rm -rf /usr/local/tomcat/webapps/employee_task
+
+                    docker cp "$WAR_FILE" \
+                        tomcat:/usr/local/tomcat/webapps/employee_task.war
+
+                    docker restart tomcat
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                sh '''
+                    sleep 20
+                    docker ps
+                    docker logs --tail 50 tomcat
                 '''
             }
         }
     }
-}pipeline {
-    agent any
 
-    triggers {
-        githubPush()
-    }
-
-    tools {
-        jdk 'JDK-17'
-        maven 'Maven-3.9.9'
-    }
-
-    stages {
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
+    post {
+        success {
+            echo 'Application deployed to Tomcat 11 successfully!'
         }
 
-        stage('Build and Test') {
-            steps {
-                sh 'mvn clean verify'
-            }
+        failure {
+            echo 'Pipeline failed. Please check Console Output.'
         }
 
-        stage('Build Docker Image') {
-            steps {
-                sh 'docker build -t employee-app:latest .'
-            }
-        }
-
-        stage('Deploy Application') {
-            steps {
-                sh '''
-                    docker rm -f employee-app || true
-                    docker run -d \
-                        --name employee-app \
-                        -p 8082:8080 \
-                        --restart unless-stopped \
-                        employee-app:latest
-                '''
-            }
+        always {
+            echo 'Pipeline execution completed.'
         }
     }
 }
